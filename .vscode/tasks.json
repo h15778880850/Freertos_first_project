@@ -1,0 +1,53 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "STM32: Configure + Build Debug",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/stm32-build.ps1",
+                "-Preset",
+                "Debug"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "STM32: Configure Debug",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/stm32-build.ps1",
+                "-Preset",
+                "Debug",
+                "-ConfigureOnly"
+            ],
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "STM32: Build Debug",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/stm32-build.ps1",
+                "-Preset",
+                "Debug",
+                "-BuildOnly"
+            ],
+            "problemMatcher": "$gcc"
+        }
+    ]
+}
