@@ -45,19 +45,22 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    Core/Src/app_min.c
-    Core/Src/bsp_adc.c
-    Core/Src/bsp_log.c
-    Core/Src/bsp_oled.c
-    Core/Src/bsp_rgb.c
-    Core/Src/bsp_w25q64.c
-    Core/Src/config_service.c
-    Core/Src/monitor_service.c
+    App/app_main.c
+    BSP/bsp_adc.c
+    BSP/bsp_log.c
+    BSP/bsp_oled.c
+    BSP/bsp_rgb.c
+    BSP/bsp_w25q64.c
+    Service/config_service.c
+    Service/monitor_service.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    App
+    BSP
+    Service
 )
 
 # Add project symbols (macros)
