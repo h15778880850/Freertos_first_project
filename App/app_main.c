@@ -5,23 +5,30 @@
 #include <string.h>
 
 #include "bsp_adc.h"
+#include "bsp_ds18b20.h"
 #include "bsp_log.h"
 #include "bsp_oled.h"
 #include "bsp_rgb.h"
 #include "bsp_w25q64.h"
 #include "config_service.h"
+#include "main.h"
 #include "monitor_service.h"
+
+#define APP_SENSOR_FLAG_K1 0x00000001U
+#define APP_K1_DEBOUNCE_MS 50U
 
 static AppRtosObjects s_rtos;
 static AppConfig s_config;
 static AppSelfTest s_self_test;
 static bool s_config_ready;
+static osThreadId_t s_sensor_task_handle;
 
 static void app_log_enqueue(const char *fmt, ...);
 static bool app_config_copy(AppConfig *config);
 static bool app_config_copy_timeout(AppConfig *config, uint32_t timeout);
 static void app_config_update(const AppConfig *config);
 static void app_request_config_save(void);
+static bool app_read_sample(const AppConfig *config, bool k1_triggered, AppSample *sample);
 
 void App_Main(const AppRtosObjects *objects)
 {
@@ -34,51 +41,79 @@ void App_Main(const AppRtosObjects *objects)
   ConfigService_Default(&s_config);
 }
 
+void App_SetSensorTaskHandle(osThreadId_t handle)
+{
+  s_sensor_task_handle = handle;
+}
+
+void App_K1PressedFromIsr(void)
+{
+  static uint32_t last_tick;
+  uint32_t now = HAL_GetTick();
+
+  if ((s_sensor_task_handle != NULL) && ((now - last_tick) >= APP_K1_DEBOUNCE_MS))
+  {
+    last_tick = now;
+    (void)osThreadFlagsSet(s_sensor_task_handle, APP_SENSOR_FLAG_K1);
+  }
+}
+
 void sensor_task(void *argument)
 {
   AppConfig config;
-  uint32_t next_tick;
+  bool k1_triggered = false;
 
   (void)argument;
 
   BSP_Rgb_Init();
   BSP_Rgb_SetSelfTest(false);
   s_self_test.adc_ok = BSP_Adc_Init();
+  s_self_test.ds18b20_ok = BSP_DS18B20_Init();
 
   while (!app_config_copy(&config))
   {
     osDelay(10U);
   }
 
-  next_tick = osKernelGetTickCount();
-
   for (;;)
   {
     AppSample sample = {0};
+    uint32_t flags;
 
     (void)app_config_copy(&config);
-    sample.threshold = config.alarm_threshold;
 
-    if (BSP_Adc_ReadRaw(&sample.raw))
+    if (k1_triggered)
     {
-      sample.alarm_active = MonitorService_UpdateAlarm(&config, sample.raw);
-      BSP_Rgb_SetAlarm(sample.alarm_active);
+      app_log_enqueue("K1 pressed: force sample and request config save");
+      app_request_config_save();
+    }
+
+    if (app_read_sample(&config, k1_triggered, &sample))
+    {
       (void)osMessageQueuePut(s_rtos.sample_queue, &sample, 0U, 0U);
-      app_log_enqueue("sample raw=%u threshold=%u alarm=%u",
-                      sample.raw,
+      app_log_enqueue("sample %s value=%d threshold=%u alarm=%u k1=%u",
+                      sample.source == APP_SAMPLE_SOURCE_DS18B20 ? "ds18b20" : "adc",
+                      sample.source == APP_SAMPLE_SOURCE_DS18B20 ? sample.temperature_centi : (int16_t)sample.raw,
                       sample.threshold,
-                      sample.alarm_active ? 1U : 0U);
+                      sample.alarm_active ? 1U : 0U,
+                      sample.k1_triggered ? 1U : 0U);
+      BSP_Rgb_SetAlarm(sample.alarm_active);
     }
     else
     {
-      sample.alarm_active = true;
       BSP_Rgb_SetAlarm(true);
-      (void)osMessageQueuePut(s_rtos.sample_queue, &sample, 0U, 0U);
-      app_log_enqueue("sample error: adc timeout");
+      app_log_enqueue("sample error: ds18b20 and adc failed");
     }
 
-    next_tick += config.sample_period_ms;
-    (void)osDelayUntil(next_tick);
+    k1_triggered = false;
+
+    flags = osThreadFlagsWait(APP_SENSOR_FLAG_K1,
+                              osFlagsWaitAny,
+                              config.sample_period_ms);
+    if ((flags & APP_SENSOR_FLAG_K1) != 0U)
+    {
+      k1_triggered = true;
+    }
   }
 }
 
@@ -134,6 +169,7 @@ void storage_task(void *argument)
                   s_self_test.flash_ok ? 1U : 0U,
                   s_self_test.oled_ok ? 1U : 0U,
                   s_self_test.config_restored ? "restored" : "default");
+  app_log_enqueue("selftest: ds18b20=%u", s_self_test.ds18b20_ok ? 1U : 0U);
   app_log_enqueue("config: period=%lu threshold=%u hysteresis=%u",
                   (unsigned long)loaded_config.sample_period_ms,
                   loaded_config.alarm_threshold,
@@ -261,4 +297,43 @@ static void app_request_config_save(void)
   {
     (void)osTimerStart(s_rtos.save_timer, 500U);
   }
+}
+
+static bool app_read_sample(const AppConfig *config, bool k1_triggered, AppSample *sample)
+{
+  int16_t temperature_centi;
+  uint16_t alarm_value;
+
+  if ((config == NULL) || (sample == NULL))
+  {
+    return false;
+  }
+
+  sample->threshold = config->alarm_threshold;
+  sample->k1_triggered = k1_triggered;
+
+  if (s_self_test.ds18b20_ok && BSP_DS18B20_StartConversion())
+  {
+    osDelay(750U);
+    if (BSP_DS18B20_ReadTemperatureCenti(&temperature_centi))
+    {
+      sample->source = APP_SAMPLE_SOURCE_DS18B20;
+      sample->temperature_centi = temperature_centi;
+      sample->raw = (uint16_t)(temperature_centi >= 0 ? temperature_centi : 0);
+      alarm_value = (uint16_t)(temperature_centi >= 0 ? temperature_centi : 0);
+      sample->alarm_active = MonitorService_UpdateAlarm(config, alarm_value);
+      return true;
+    }
+  }
+
+  if (BSP_Adc_ReadRaw(&sample->raw))
+  {
+    sample->source = APP_SAMPLE_SOURCE_ADC;
+    sample->temperature_centi = 0;
+    sample->alarm_active = MonitorService_UpdateAlarm(config, sample->raw);
+    return true;
+  }
+
+  sample->alarm_active = true;
+  return false;
 }

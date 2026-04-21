@@ -21,6 +21,7 @@ static const uint8_t *font5x7(char ch)
 {
   static const uint8_t blank[5] = {0, 0, 0, 0, 0};
   static const uint8_t colon[5] = {0x00, 0x36, 0x36, 0x00, 0x00};
+  static const uint8_t dot[5] = {0x00, 0x60, 0x60, 0x00, 0x00};
   static const uint8_t slash[5] = {0x20, 0x10, 0x08, 0x04, 0x02};
   static const uint8_t dash[5] = {0x08, 0x08, 0x08, 0x08, 0x08};
   static const uint8_t zero[5] = {0x3E, 0x51, 0x49, 0x45, 0x3E};
@@ -60,6 +61,7 @@ static const uint8_t *font5x7(char ch)
   {
     case ' ': return blank;
     case ':': return colon;
+    case '.': return dot;
     case '/': return slash;
     case '-': return dash;
     case '0': return zero;
@@ -204,6 +206,8 @@ void BSP_Oled_ShowBoot(const AppSelfTest *self_test)
 void BSP_Oled_ShowSample(const AppSample *sample)
 {
   char line[22];
+  int16_t temperature;
+  uint16_t magnitude;
 
   if (!s_oled_ready || (sample == 0))
   {
@@ -211,10 +215,29 @@ void BSP_Oled_ShowSample(const AppSample *sample)
   }
 
   oled_clear();
-  snprintf(line, sizeof(line), "ADC:%04u", sample->raw);
-  oled_puts(0, 0, line);
-  snprintf(line, sizeof(line), "THR:%04u", sample->threshold);
-  oled_puts(2, 0, line);
+  if (sample->source == APP_SAMPLE_SOURCE_DS18B20)
+  {
+    temperature = sample->temperature_centi;
+    magnitude = (uint16_t)(temperature < 0 ? -temperature : temperature);
+    snprintf(line, sizeof(line), "T:%s%u.%02uC",
+             temperature < 0 ? "-" : "",
+             magnitude / 100U,
+             magnitude % 100U);
+    oled_puts(0, 0, line);
+    snprintf(line, sizeof(line), "TH:%u.%02uC", sample->threshold / 100U, sample->threshold % 100U);
+    oled_puts(2, 0, line);
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "ADC:%04u", sample->raw);
+    oled_puts(0, 0, line);
+    snprintf(line, sizeof(line), "THR:%04u", sample->threshold);
+    oled_puts(2, 0, line);
+  }
   oled_puts(4, 0, sample->alarm_active ? "ALARM" : "NORMAL");
+  if (sample->k1_triggered)
+  {
+    oled_puts(6, 0, "K1");
+  }
   oled_flush();
 }
