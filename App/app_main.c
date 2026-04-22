@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "bsp_adc.h"
 #include "bsp_ds18b20.h"
 #include "bsp_log.h"
 #include "bsp_oled.h"
@@ -16,11 +15,14 @@
 
 #define APP_SENSOR_FLAG_K1 0x00000001U
 #define APP_K1_DEBOUNCE_MS 50U
+#define APP_DS18B20_READ_RETRY 3U
+#define APP_K1_POLL_MS 20U
 
 static AppRtosObjects s_rtos;
 static AppConfig s_config;
 static AppSelfTest s_self_test;
 static bool s_config_ready;
+static bool s_sensor_ready;
 static osThreadId_t s_sensor_task_handle;
 
 static void app_log_enqueue(const char *fmt, ...);
@@ -29,7 +31,16 @@ static bool app_config_copy_timeout(AppConfig *config, uint32_t timeout);
 static void app_config_update(const AppConfig *config);
 static void app_request_config_save(void);
 static bool app_read_sample(const AppConfig *config, bool k1_triggered, AppSample *sample);
+static bool app_wait_period_or_k1(uint32_t period_ms);
 
+/**
+ * @brief 应用程序主入口函数
+ *
+ * 初始化RTOS对象并配置默认参数
+ *
+ * @param objects RTOS对象指针，包含队列、信号量等资源
+ * @return 无
+ */
 void App_Main(const AppRtosObjects *objects)
 {
   if (objects == NULL)
@@ -58,6 +69,13 @@ void App_K1PressedFromIsr(void)
   }
 }
 
+/**
+ * 传感器任务
+ *
+ * 初始化RGB和DS18B20传感器，持续读取传感器数据，
+ * 处理K1按钮触发（强制采样并请求保存配置），将采样数据发送到消息队列，
+ * 并根据阈值控制报警LED。
+ */
 void sensor_task(void *argument)
 {
   AppConfig config;
@@ -67,8 +85,8 @@ void sensor_task(void *argument)
 
   BSP_Rgb_Init();
   BSP_Rgb_SetSelfTest(false);
-  s_self_test.adc_ok = BSP_Adc_Init();
   s_self_test.ds18b20_ok = BSP_DS18B20_Init();
+  s_sensor_ready = true;
 
   while (!app_config_copy(&config))
   {
@@ -78,9 +96,12 @@ void sensor_task(void *argument)
   for (;;)
   {
     AppSample sample = {0};
-    uint32_t flags;
 
     (void)app_config_copy(&config);
+    if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
+    {
+      k1_triggered = true;
+    }
 
     if (k1_triggered)
     {
@@ -90,10 +111,13 @@ void sensor_task(void *argument)
 
     if (app_read_sample(&config, k1_triggered, &sample))
     {
+      if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
+      {
+        sample.k1_triggered = true;
+      }
       (void)osMessageQueuePut(s_rtos.sample_queue, &sample, 0U, 0U);
-      app_log_enqueue("sample %s value=%d threshold=%u alarm=%u k1=%u",
-                      sample.source == APP_SAMPLE_SOURCE_DS18B20 ? "ds18b20" : "adc",
-                      sample.source == APP_SAMPLE_SOURCE_DS18B20 ? sample.temperature_centi : (int16_t)sample.raw,
+      app_log_enqueue("sample ds18b20 value=%d threshold=%u alarm=%u k1=%u",
+                      sample.temperature_centi,
                       sample.threshold,
                       sample.alarm_active ? 1U : 0U,
                       sample.k1_triggered ? 1U : 0U);
@@ -101,19 +125,18 @@ void sensor_task(void *argument)
     }
     else
     {
+      if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
+      {
+        sample.k1_triggered = true;
+      }
       BSP_Rgb_SetAlarm(true);
-      app_log_enqueue("sample error: ds18b20 and adc failed");
+      (void)osMessageQueuePut(s_rtos.sample_queue, &sample, 0U, 0U);
+      app_log_enqueue("sample error: ds18b20 failed");
     }
 
     k1_triggered = false;
 
-    flags = osThreadFlagsWait(APP_SENSOR_FLAG_K1,
-                              osFlagsWaitAny,
-                              config.sample_period_ms);
-    if ((flags & APP_SENSOR_FLAG_K1) != 0U)
-    {
-      k1_triggered = true;
-    }
+    k1_triggered = app_wait_period_or_k1(config.sample_period_ms);
   }
 }
 
@@ -127,6 +150,11 @@ void ui_task(void *argument)
   s_self_test.oled_ok = BSP_Oled_Init();
 
   while (!app_config_copy(&config))
+  {
+    osDelay(10U);
+  }
+
+  while (!s_sensor_ready)
   {
     osDelay(10U);
   }
@@ -153,6 +181,7 @@ void storage_task(void *argument)
 
   s_self_test.flash_ok = BSP_W25Q64_Init();
   flash_id = BSP_W25Q64_ReadJedecId();
+  s_self_test.flash_jedec_id = flash_id;
   s_self_test.config_restored = ConfigService_Load(&loaded_config);
 
   if (!s_self_test.config_restored)
@@ -164,8 +193,7 @@ void storage_task(void *argument)
 
   app_log_enqueue("First_project monitor boot");
   app_log_enqueue("flash jedec=0x%06lX", (unsigned long)flash_id);
-  app_log_enqueue("selftest: adc=%u flash=%u oled=%u cfg=%s",
-                  s_self_test.adc_ok ? 1U : 0U,
+  app_log_enqueue("selftest: flash=%u oled=%u cfg=%s",
                   s_self_test.flash_ok ? 1U : 0U,
                   s_self_test.oled_ok ? 1U : 0U,
                   s_self_test.config_restored ? "restored" : "default");
@@ -190,7 +218,16 @@ void storage_task(void *argument)
       }
       else
       {
-        app_log_enqueue("config save failed");
+        uint32_t jedec_id = BSP_W25Q64_ReadJedecId();
+        BspW25q64Error error = BSP_W25Q64_GetLastError();
+        uint8_t status = BSP_W25Q64_ReadStatusReg();
+        bool ready = BSP_W25Q64_IsReady();
+
+        app_log_enqueue("config save failed id=0x%06lX sr=0x%02X err=%u ready=%u",
+                        (unsigned long)jedec_id,
+                        status,
+                        (unsigned int)error,
+                        ready ? 1U : 0U);
       }
     }
   }
@@ -312,28 +349,73 @@ static bool app_read_sample(const AppConfig *config, bool k1_triggered, AppSampl
   sample->threshold = config->alarm_threshold;
   sample->k1_triggered = k1_triggered;
 
-  if (s_self_test.ds18b20_ok && BSP_DS18B20_StartConversion())
+  if (!s_self_test.ds18b20_ok)
   {
-    osDelay(750U);
-    if (BSP_DS18B20_ReadTemperatureCenti(&temperature_centi))
+    s_self_test.ds18b20_ok = BSP_DS18B20_Init();
+  }
+
+  for (uint8_t retry = 0; retry < APP_DS18B20_READ_RETRY; retry++)
+  {
+    if (!s_self_test.ds18b20_ok)
     {
-      sample->source = APP_SAMPLE_SOURCE_DS18B20;
-      sample->temperature_centi = temperature_centi;
-      sample->raw = (uint16_t)(temperature_centi >= 0 ? temperature_centi : 0);
-      alarm_value = (uint16_t)(temperature_centi >= 0 ? temperature_centi : 0);
-      sample->alarm_active = MonitorService_UpdateAlarm(config, alarm_value);
+      s_self_test.ds18b20_ok = BSP_DS18B20_Init();
+    }
+
+    if (s_self_test.ds18b20_ok && BSP_DS18B20_StartConversion())
+    {
+      osDelay(800U);
+      if (BSP_DS18B20_ReadTemperatureCenti(&temperature_centi))
+      {
+        s_self_test.ds18b20_ok = true;
+        sample->temperature_centi = temperature_centi;
+        sample->valid = true;
+        alarm_value = (uint16_t)(temperature_centi >= 0 ? temperature_centi : 0);
+        sample->alarm_active = MonitorService_UpdateAlarm(config, alarm_value);
+        return true;
+      }
+    }
+
+    osDelay(20U);
+  }
+
+  sample->valid = false;
+  sample->alarm_active = true;
+  return false;
+}
+
+static bool app_wait_period_or_k1(uint32_t period_ms)
+{
+  uint32_t elapsed = 0U;
+  uint32_t last_press_tick = 0U;
+
+  while (elapsed < period_ms)
+  {
+    uint32_t wait_ms = period_ms - elapsed;
+    uint32_t flags;
+
+    if (wait_ms > APP_K1_POLL_MS)
+    {
+      wait_ms = APP_K1_POLL_MS;
+    }
+
+    flags = osThreadFlagsWait(APP_SENSOR_FLAG_K1, osFlagsWaitAny, wait_ms);
+    if ((flags & APP_SENSOR_FLAG_K1) != 0U)
+    {
       return true;
     }
+
+    if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
+    {
+      uint32_t now = HAL_GetTick();
+      if ((now - last_press_tick) >= APP_K1_DEBOUNCE_MS)
+      {
+        last_press_tick = now;
+        return true;
+      }
+    }
+
+    elapsed += wait_ms;
   }
 
-  if (BSP_Adc_ReadRaw(&sample->raw))
-  {
-    sample->source = APP_SAMPLE_SOURCE_ADC;
-    sample->temperature_centi = 0;
-    sample->alarm_active = MonitorService_UpdateAlarm(config, sample->raw);
-    return true;
-  }
-
-  sample->alarm_active = true;
   return false;
 }

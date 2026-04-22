@@ -9,7 +9,7 @@
 #define CONFIG_FLASH_ADDR  0x000000UL
 #define CONFIG_MIN_PERIOD  100U
 #define CONFIG_MAX_PERIOD  60000U
-#define CONFIG_MAX_ADC     4095U
+#define CONFIG_MAX_TEMP_CENTI 4095U
 
 typedef struct
 {
@@ -39,7 +39,7 @@ static bool config_is_valid(const AppConfig *config)
 {
   return (config->sample_period_ms >= CONFIG_MIN_PERIOD) &&
          (config->sample_period_ms <= CONFIG_MAX_PERIOD) &&
-         (config->alarm_threshold <= CONFIG_MAX_ADC) &&
+         (config->alarm_threshold <= CONFIG_MAX_TEMP_CENTI) &&
          (config->alarm_hysteresis <= config->alarm_threshold);
 }
 

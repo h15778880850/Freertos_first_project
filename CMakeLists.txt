@@ -46,7 +46,6 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     App/app_main.c
-    BSP/bsp_adc.c
     BSP/bsp_ds18b20.c
     BSP/bsp_log.c
     BSP/bsp_oled.c

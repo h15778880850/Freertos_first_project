@@ -119,7 +119,6 @@ void MX_FREERTOS_Init(void)
   storage_task_handle = osThreadNew(storage_task, NULL, &storage_task_attributes);
   ui_task_handle = osThreadNew(ui_task, NULL, &ui_task_attributes);
   sensor_task_handle = osThreadNew(sensor_task, NULL, &sensor_task_attributes);
-  App_SetSensorTaskHandle(sensor_task_handle);
 
   if ((log_task_handle == NULL) ||
       (storage_task_handle == NULL) ||

@@ -190,6 +190,8 @@ bool BSP_Oled_Init(void)
 
 void BSP_Oled_ShowBoot(const AppSelfTest *self_test)
 {
+  char line[22];
+
   if (!s_oled_ready || (self_test == 0))
   {
     return;
@@ -199,7 +201,10 @@ void BSP_Oled_ShowBoot(const AppSelfTest *self_test)
   oled_puts(0, 0, "SELFTEST");
   oled_puts(2, 0, self_test->flash_ok ? "FLASH OK" : "FLASH ERR");
   oled_puts(3, 0, self_test->config_restored ? "CFG RESTORED" : "CFG DEFAULT");
-  oled_puts(4, 0, self_test->adc_ok ? "ADC OK" : "ADC ERR");
+  oled_puts(4, 0, self_test->ds18b20_ok ? "DS18B20 OK" : "DS18B20 ERR");
+  snprintf(line, sizeof(line), "ID:%06lX", (unsigned long)self_test->flash_jedec_id);
+  oled_puts(5, 0, line);
+  oled_puts(7, 0, "FW0422");
   oled_flush();
 }
 
@@ -215,29 +220,30 @@ void BSP_Oled_ShowSample(const AppSample *sample)
   }
 
   oled_clear();
-  if (sample->source == APP_SAMPLE_SOURCE_DS18B20)
+  if (sample->valid)
   {
     temperature = sample->temperature_centi;
     magnitude = (uint16_t)(temperature < 0 ? -temperature : temperature);
-    snprintf(line, sizeof(line), "T:%s%u.%02uC",
+    oled_puts(0, 0, "TEMP NOW");
+    snprintf(line, sizeof(line), "%s%u.%02uC",
              temperature < 0 ? "-" : "",
              magnitude / 100U,
              magnitude % 100U);
-    oled_puts(0, 0, line);
-    snprintf(line, sizeof(line), "TH:%u.%02uC", sample->threshold / 100U, sample->threshold % 100U);
     oled_puts(2, 0, line);
+    snprintf(line, sizeof(line), "THR:%u.%02uC", sample->threshold / 100U, sample->threshold % 100U);
+    oled_puts(4, 0, line);
+    oled_puts(6, 0, sample->alarm_active ? "ALARM" : "NORMAL");
   }
   else
   {
-    snprintf(line, sizeof(line), "ADC:%04u", sample->raw);
-    oled_puts(0, 0, line);
-    snprintf(line, sizeof(line), "THR:%04u", sample->threshold);
-    oled_puts(2, 0, line);
+    oled_puts(0, 0, "TEMP ERR");
+    oled_puts(2, 0, "DS18B20 READ");
+    oled_puts(4, 0, "ALARM");
   }
-  oled_puts(4, 0, sample->alarm_active ? "ALARM" : "NORMAL");
+  oled_puts(7, 0, "FW0422");
   if (sample->k1_triggered)
   {
-    oled_puts(6, 0, "K1");
+    oled_puts(6, 8, "K1");
   }
   oled_flush();
 }
