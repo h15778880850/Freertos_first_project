@@ -62,6 +62,11 @@ void App_K1PressedFromIsr(void)
   static uint32_t last_tick;
   uint32_t now = HAL_GetTick();
 
+  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) != GPIO_PIN_SET)
+  {
+    return;
+  }
+
   if ((s_sensor_task_handle != NULL) && ((now - last_tick) >= APP_K1_DEBOUNCE_MS))
   {
     last_tick = now;
@@ -98,23 +103,15 @@ void sensor_task(void *argument)
     AppSample sample = {0};
 
     (void)app_config_copy(&config);
-    if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
-    {
-      k1_triggered = true;
-    }
 
     if (k1_triggered)
     {
-      app_log_enqueue("K1 pressed: force sample and request config save");
+      app_log_enqueue("K1 released: force sample and request config save");
       app_request_config_save();
     }
 
     if (app_read_sample(&config, k1_triggered, &sample))
     {
-      if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
-      {
-        sample.k1_triggered = true;
-      }
       (void)osMessageQueuePut(s_rtos.sample_queue, &sample, 0U, 0U);
       app_log_enqueue("sample ds18b20 value=%d threshold=%u alarm=%u k1=%u",
                       sample.temperature_centi,
@@ -125,10 +122,6 @@ void sensor_task(void *argument)
     }
     else
     {
-      if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
-      {
-        sample.k1_triggered = true;
-      }
       BSP_Rgb_SetAlarm(true);
       (void)osMessageQueuePut(s_rtos.sample_queue, &sample, 0U, 0U);
       app_log_enqueue("sample error: ds18b20 failed");
@@ -386,12 +379,14 @@ static bool app_read_sample(const AppConfig *config, bool k1_triggered, AppSampl
 static bool app_wait_period_or_k1(uint32_t period_ms)
 {
   uint32_t elapsed = 0U;
-  uint32_t last_press_tick = 0U;
+  uint32_t release_tick = 0U;
+  bool pressed_seen = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET);
 
   while (elapsed < period_ms)
   {
     uint32_t wait_ms = period_ms - elapsed;
     uint32_t flags;
+    GPIO_PinState k1_level;
 
     if (wait_ms > APP_K1_POLL_MS)
     {
@@ -404,12 +399,23 @@ static bool app_wait_period_or_k1(uint32_t period_ms)
       return true;
     }
 
-    if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
+    k1_level = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+    if (k1_level == GPIO_PIN_RESET)
+    {
+      pressed_seen = true;
+      release_tick = 0U;
+    }
+    else if (pressed_seen)
     {
       uint32_t now = HAL_GetTick();
-      if ((now - last_press_tick) >= APP_K1_DEBOUNCE_MS)
+
+      if (release_tick == 0U)
       {
-        last_press_tick = now;
+        release_tick = now;
+      }
+
+      if ((now - release_tick) >= APP_K1_DEBOUNCE_MS)
+      {
         return true;
       }
     }

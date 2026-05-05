@@ -127,7 +127,8 @@ void MX_FREERTOS_Init(void)
   {
     Error_Handler();
   }
+
+  App_SetSensorTaskHandle(sensor_task_handle);
 }
 
 /* USER CODE END Application */
-

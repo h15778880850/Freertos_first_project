@@ -208,6 +208,12 @@ void BSP_Oled_ShowBoot(const AppSelfTest *self_test)
   oled_flush();
 }
 
+/**
+ * @brief  在OLED上显示采样数据
+ * @param  sample 指向采样数据结构的指针，包含温度、阈值、报警状态等信息
+ * @retval 无
+ * @note   当OLED未就绪或参数为空时直接返回；根据数据有效性显示正常数据或错误信息
+ */
 void BSP_Oled_ShowSample(const AppSample *sample)
 {
   char line[22];

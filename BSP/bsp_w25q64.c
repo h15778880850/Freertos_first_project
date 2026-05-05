@@ -4,8 +4,8 @@
 
 #include "main.h"
 
-#define W25Q64_CS_PORT          GPIOA
-#define W25Q64_CS_PIN           GPIO_PIN_4
+#define W25Q64_CS_PORT          GPIOB
+#define W25Q64_CS_PIN           GPIO_PIN_9
 #define W25Q64_TIMEOUT_MS       100U
 #define W25Q64_PAGE_SIZE        256U
 #define W25Q64_SECTOR_SIZE      4096U
@@ -166,7 +166,7 @@ bool BSP_W25Q64_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   uint32_t id = 0U;
 
-  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   HAL_GPIO_WritePin(W25Q64_CS_PORT, W25Q64_CS_PIN, GPIO_PIN_SET);
 
