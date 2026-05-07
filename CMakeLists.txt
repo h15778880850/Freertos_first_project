@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     BSP/bsp_ds18b20.c
     BSP/bsp_log.c
     BSP/bsp_oled.c
+    BSP/bsp_ec11.c
     BSP/bsp_rgb.c
     BSP/bsp_w25q64.c
     Service/config_service.c

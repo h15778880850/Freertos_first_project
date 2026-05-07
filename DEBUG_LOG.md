@@ -374,3 +374,313 @@ K1 当前行为变为：
 RAM:   17008 B / 20 KB  83.05%
 FLASH: 39496 B / 64 KB  60.27%
 ```
+
+## 12. OLED UI 重构 + EC11 旋转编码器集成
+
+### 12.1 需求说明
+
+将单调的温度显示界面改造为多模块菜单系统：
+
+- 启动时显示 "Loading..." 加载页面。
+- 加载完成后进入模块选择页面，通过 EC11 旋转编码器导航。
+- 目前有温度测量模块和 Flash 模块可选，后续可扩展。
+- 旋转 EC11 选择模块，按下 KEY 进入/退出模块。
+
+### 12.2 EC11 硬件接线与原理
+
+| 编码器信号 | STM32 引脚 | 配置模式 | 作用 |
+|---|---|---|---|
+| S1 (A 相) | PB12 | EXTI 上升沿中断 | 旋转触发信号 |
+| S2 (B 相) | PB0 | GPIO 输入 | 旋转方向判断 |
+| KEY (按键) | PB1 | GPIO 输入 | 确认/返回 |
+
+**EC11 正交解码原理**:
+
+EC11 旋转编码器输出两路正交方波 (S1/S2)。当旋转时:
+- **顺时针 (CW)**: S1 上升沿时 S2 为低电平
+- **逆时针 (CCW)**: S1 上升沿时 S2 为高电平
+
+PB12 配置为上升沿中断触发。进入 ISR 后读取 PB0 (S2) 电平即可判断方向:
+
+```
+S1 (PB12) ──┐    ┌──    (上升沿 → ISR 触发)
+             └────┘
+S2 (PB0)  ────┐  ┌───   (低电平 → CW)
+              └──┘
+S2 (PB0)  ┌───┐  ┌───   (高电平 → CCW)
+          └───┘  └
+```
+
+### 12.3 OLED UI 状态机设计
+
+```
+  ┌──────────┐   初始化完成   ┌──────────┐
+  │  LOADING  │──────────────→│   MENU    │
+  │ "Loading" │               │ 选择模块  │
+  └──────────┘               └─────┬─────┘
+                              KEY  │  KEY
+                    ┌──────────────┼──────────────┐
+                    ↓              │              ↓
+              ┌───────────┐        │       ┌───────────┐
+              │MODULE_TEMP│        │       │MODULE_FLASH│
+              │ 实时温度  │        │       │ Flash存储  │
+              └─────┬─────┘        │       └─────┬─────┘
+                    └──────────────┼──────────────┘
+                              KEY (返回)
+```
+
+状态转换逻辑:
+
+| 当前状态 | 事件 | 下一状态 |
+|---|---|---|
+| LOADING | 所有外设初始化完成 + 延时 300ms | MENU |
+| MENU | KEY 按下且选中 Temperature | MODULE_TEMP |
+| MENU | KEY 按下且选中 Flash Storage | MODULE_FLASH |
+| MENU | EC11 顺时针旋转 | 光标下移 |
+| MENU | EC11 逆时针旋转 | 光标上移 |
+| MODULE_TEMP | KEY 按下 | MENU |
+| MODULE_FLASH | KEY 按下 | MENU |
+
+### 12.4 ISR 与任务通信机制
+
+EC11 S1 旋转通过 **ISR → Task Notification → 轮询** 三级机制处理:
+
+```
+PB12 上升沿
+    │
+    ▼
+EXTI15_10_IRQHandler()
+    │
+    ▼
+HAL_GPIO_EXTI_Callback(PIN_12)
+    │
+    ▼
+BSP_EC11_HandleS1Isr()
+    ├── 读取 PB0 (S2) 判断方向
+    ├── 更新 volatile int32_t s_ec11_rotation (±1)
+    └── osThreadFlagsSet(ui_task, EC11_FLAG_ROTATION)  → 唤醒 ui_task
+                                                            │
+ui_task 主循环                                              │
+    ├── osThreadFlagsWait(EC11_FLAG_ROTATION, 100ms) ◄─────┘
+    ├── BSP_EC11_GetRotation() → 原子读取+清零累加器
+    ├── 根据旋转值更新菜单光标
+    └── BSP_EC11_IsKeyPressed() → 轮询 PB1 + 50ms 消抖
+```
+
+关键设计原则:
+- **ISR 极简**: 只做硬件读取和原子操作，不调用阻塞 API。
+- **Task Notification 唤醒**: ISR 通过 `osThreadFlagsSet()` 唤醒 ui_task，比队列更轻量。
+- **KEY 任务轮询**: PB1 无 EXTI，由 ui_task 每 100ms 轮询一次，50ms 软件消抖。
+- **OLED 在任务上下文刷新**: I2C 阻塞操作在任务中执行，不再 ISR 内。
+
+### 12.5 构建系统与 CMake 架构
+
+#### 目录结构
+
+```
+First_project/
+├── cmake/
+│   └── stm32cubemx/
+│       └── CMakeLists.txt        ← 生成代码构建配置
+├── CMakeLists.txt                ← 用户代码构建配置
+├── CMakePresets.json             ← 预设 (Debug/Release)
+├── Core/                         ← CubeMX 生成的文件
+│   ├── Inc/                      ← 头文件 (main.h, FreeRTOSConfig.h, ...)
+│   └── Src/                      ← 源文件 (main.c, freertos.c, ...)
+├── App/                          ← 应用层 (app_main.c/h)
+├── BSP/                          ← 板级驱动 (bsp_*.c)
+├── Service/                      ← 服务层 (config_service.c, monitor_service.c)
+├── Drivers/                      ← HAL 库 + CMSIS
+└── Middlewares/                   ← FreeRTOS
+```
+
+#### CMake 层次结构
+
+```
+顶层 CMakeLists.txt
+    │
+    ├── target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    │       App/app_main.c        ← 用户应用代码
+    │       BSP/bsp_*.c           ← 用户 BSP 驱动
+    │       Service/*.c           ← 用户服务层
+    │   )
+    │
+    └── add_subdirectory(cmake/stm32cubemx)
+            │
+            └── cmake/stm32cubemx/CMakeLists.txt
+                    │
+                    ├── add_library(stm32cubemx INTERFACE)
+                    │       └── 提供公共头文件路径 + 宏定义
+                    │
+                    ├── add_library(STM32_Drivers OBJECT)
+                    │       └── HAL 驱动源码 (stm32f1xx_hal_*.c)
+                    │
+                    ├── add_library(FreeRTOS OBJECT)
+                    │       └── FreeRTOS 内核源码
+                    │
+                    └── target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+                            Core/Src/main.c              ← CubeMX 生成的 main
+                            Core/Src/freertos.c          ← CubeMX 生成的 RTOS 配置
+                            Core/Src/stm32f1xx_it.c      ← 中断服务程序
+                            Core/Src/stm32f1xx_hal_msp.c ← HAL MSP 配置
+                            ...
+                        )
+```
+
+#### 链接器符号解析与重定义冲突
+
+本项目的关键架构特点: **用户代码 (app_main.c) 与 CubeMX 生成代码 (main.c) 同时定义同名 task 函数**。
+
+**原因**:
+- `main.c` (CubeMX 生成) 自动包含 4 个 task 的 stub 实现 (仅 `osDelay(1)` 空循环)。
+- `app_main.c` (用户代码) 提供了 4 个 task 的完整实现。
+- `freertos.c` 同时定义了 4 个 task 的 `osThreadAttr_t` 属性结构体。
+
+**冲突表现**:
+```
+multiple definition of `sensor_task'
+multiple definition of `ui_task'
+multiple definition of `storage_task'
+multiple definition of `log_task'
+multiple definition of `sensor_task_attributes'
+... (共 8 个重定义错误)
+```
+
+**解决方案**:
+
+1. **从 `main.c` 中删除 stub task 函数体** (位于 `USER CODE BEGIN 5` / `USER CODE END 5` 用户编辑区):
+   - 删除 `sensor_task()`, `ui_task()`, `storage_task()`, `log_task()` 四个空壳函数。
+
+2. **从 `main.c` 中删除 task 属性定义** (auto-generated 区):
+   - 删除 `sensor_task_attributes`, `ui_task_attributes` 等 4 个属性结构体。
+   - 删除 `sensor_taskHandle`, `ui_taskHandle` 等 4 个 task handle 变量。
+
+3. **从 `main()` 中删除重复的 `osThreadNew()` 调用** (auto-generated 区):
+   - 任务创建统一由 `MX_FREERTOS_Init()` (freertos.c) 负责。
+
+**链接行为说明**:
+- CubeMX 的 Drivers 和 FreeRTOS 编译为 OBJECT library (`.o` 集合)。
+- 用户代码和 CubeMX 应用代码直接编译到可执行文件中。
+- 当同一个符号在多个 `.o` 中出现时，链接器报 `multiple definition` 错误。
+- 删除 `main.c` 中的重复定义后，只保留 `app_main.c` + `freertos.c` 的唯一定义。
+
+### 12.6 编译命令与结果
+
+#### 配置
+
+```bash
+# 首次配置 (使用 Debug 预设)
+cmake --preset Debug
+```
+
+预设定义来自 `CMakePresets.json`:
+```json
+{
+  "configurePresets": [
+    {
+      "name": "Debug",
+      "binaryDir": "${sourceDir}/build/Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": ".../stm32-toolchain.cmake"
+      }
+    }
+  ]
+}
+```
+
+#### 编译
+
+```bash
+cmake --build build/Debug
+```
+
+使用 Ninja 构建系统 + `arm-none-eabi-gcc` 13.3.1 工具链。
+
+编译选项:
+- `-mcpu=cortex-m3`: Cortex-M3 指令集
+- `-O0 -g3`: Debug 优化级别 (无优化, 完整调试信息)
+- `-Wall`: 启用所有警告
+- `-fdata-sections -ffunction-sections`: 按段编译
+- `-Wl,--gc-sections`: 链接时移除未引用段
+
+#### 最终构建结果
+
+```
+RAM:   17032 B / 20 KB (83.16%)
+FLASH: 41024 B / 64 KB (62.60%)
+0 warnings, 0 errors
+```
+
+#### 内存分析
+
+| 区域 | 已用 | 总量 | 占比 | 说明 |
+|---|---|---|---|---|
+| RAM | 17032 B | 20 KB | 83.16% | 含 4 个任务栈 + FreeRTOS 堆 (heap_4, 10KB) + 系统变量 |
+| FLASH | 41024 B | 64 KB | 62.60% | 含 HAL 库 + FreeRTOS + 用户代码 + BSP 驱动 |
+
+**RAM 构成估算**:
+
+| 组件 | 大小 | 说明 |
+|---|---|---|
+| FreeRTOS heap_4 | 10240 B | `configTOTAL_HEAP_SIZE` |
+| sensor_task 栈 | 1280 B | 320 × 4 |
+| ui_task 栈 | 1536 B | 384 × 4 |
+| storage_task 栈 | 1280 B | 320 × 4 |
+| log_task 栈 | 1536 B | 384 × 4 |
+| 系统/内核/其他 | ~1160 B | 系统变量、IDLE 任务等 |
+| **合计** | **~17032 B** | |
+
+**FLASH 构成估算**:
+
+| 组件 | 大小 | 说明 |
+|---|---|---|
+| HAL 库 (I2C/SPI/GPIO/TIM 等) | ~18 KB | 按需链接 (gc-sections) |
+| FreeRTOS 内核 (tasks/queue/timers 等) | ~10 KB | CMSIS-RTOS v2 封装层 |
+| 用户应用层 (app_main.c) | ~5 KB | 任务逻辑 + UI 状态机 |
+| BSP 驱动 (ds18b20/w25q64/oled/ec11 等) | ~6 KB | 硬件驱动层 |
+| 启动代码 + 系统初始化 | ~2 KB | startup + system + HAL_Init |
+| **合计** | **~41 KB** | |
+
+### 12.7 文件变更清单
+
+| 操作 | 文件 | 说明 |
+|---|---|---|
+| **新建** | `BSP/bsp_ec11.c` | EC11 旋转编码器 BSP 驱动 (正交解码 + 按键消抖) |
+| **新建** | `Core/Inc/bsp_ec11.h` | EC11 驱动头文件 |
+| **修改** | `App/app_main.c` | ui_task 重写为状态机; 新增 UiState 枚举和模块数组; 新增 app_ui_init() + App_GetUiTaskHandle() |
+| **修改** | `App/app_main.h` | 新增 App_GetUiTaskHandle() 声明 |
+| **修改** | `BSP/bsp_oled.c` | 新增 BSP_Oled_ShowLoading / ShowMenu / ShowFlashInfo |
+| **修改** | `Core/Inc/bsp_oled.h` | 新增 3 个显示函数声明 |
+| **修改** | `Core/Src/stm32f1xx_it.c` | PB12 中断回调接入 BSP_EC11_HandleS1Isr() |
+| **修改** | `Core/Src/main.c` | 移除重复的 task stub/属性/创建调用 |
+| **修改** | `CMakeLists.txt` | 添加 BSP/bsp_ec11.c 到编译源列表 |
+
+### 12.8 模块可扩展设计
+
+模块列表通过编译期数组定义，添加新模块只需两步:
+
+```c
+// 1. 在枚举中添加
+typedef enum {
+  UI_STATE_LOADING,
+  UI_STATE_MENU,
+  UI_STATE_MODULE_TEMP,
+  UI_STATE_MODULE_FLASH,
+  UI_STATE_MODULE_NEW,       // ← 新增
+} UiState;
+
+// 2. 在数组和 case 中添加
+static const char *const s_module_names[MODULE_COUNT] = {
+  "Temperature",
+  "Flash Storage",
+  "New Module",              // ← 新增
+};
+
+// 在 ui_task switch 中添加对应状态的处理
+case UI_STATE_MODULE_NEW:
+  // 新模块的显示和交互逻辑
+  break;
+```
+
+不需要修改 ISR、EC11 驱动或 RTOS 配置。

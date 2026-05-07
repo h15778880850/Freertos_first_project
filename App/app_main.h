@@ -21,6 +21,7 @@ typedef struct
 void App_Main(const AppRtosObjects *objects);
 void App_SetSensorTaskHandle(osThreadId_t handle);
 void App_K1PressedFromIsr(void);
+osThreadId_t App_GetUiTaskHandle(void);
 
 void sensor_task(void *argument);
 void ui_task(void *argument);

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "bsp_ds18b20.h"
+#include "bsp_ec11.h"
 #include "bsp_log.h"
 #include "bsp_oled.h"
 #include "bsp_rgb.h"
@@ -17,13 +18,33 @@
 #define APP_K1_DEBOUNCE_MS 50U
 #define APP_DS18B20_READ_RETRY 3U
 #define APP_K1_POLL_MS 20U
+#define APP_UI_TICK_MS 100U
+
+typedef enum
+{
+  UI_STATE_LOADING,
+  UI_STATE_MENU,
+  UI_STATE_MODULE_TEMP,
+  UI_STATE_MODULE_FLASH,
+} UiState;
+
+#define MODULE_TEMP  0U
+#define MODULE_FLASH 1U
+#define MODULE_COUNT 2U
+
+static const char *const s_module_names[MODULE_COUNT] = {
+  "Temperature",
+  "Flash Storage",
+};
 
 static AppRtosObjects s_rtos;
 static AppConfig s_config;
-static AppSelfTest s_self_test;
+static AppSelfTest 
+s_self_test;
 static bool s_config_ready;
 static bool s_sensor_ready;
 static osThreadId_t s_sensor_task_handle;
+static osThreadId_t s_ui_task_handle;
 
 static void app_log_enqueue(const char *fmt, ...);
 static bool app_config_copy(AppConfig *config);
@@ -55,6 +76,19 @@ void App_Main(const AppRtosObjects *objects)
 void App_SetSensorTaskHandle(osThreadId_t handle)
 {
   s_sensor_task_handle = handle;
+}
+
+osThreadId_t App_GetUiTaskHandle(void)
+{
+  return s_ui_task_handle;
+}
+
+static void app_ui_init(void)
+{
+  s_ui_task_handle = osThreadGetId();
+  s_self_test.oled_ok = BSP_Oled_Init();
+  BSP_EC11_Init();
+  BSP_EC11_SetTaskHandle(s_ui_task_handle);
 }
 
 void App_K1PressedFromIsr(void)
@@ -135,31 +169,121 @@ void sensor_task(void *argument)
 
 void ui_task(void *argument)
 {
+  UiState state = UI_STATE_LOADING;
+  uint8_t progress = 0;
+  uint8_t menu_selection = 0;
   AppConfig config;
   AppSample sample;
+  int32_t rotation;
 
   (void)argument;
 
-  s_self_test.oled_ok = BSP_Oled_Init();
+  app_ui_init();
+
+  progress = 1;
+  BSP_Oled_ShowLoading(progress);
 
   while (!app_config_copy(&config))
   {
     osDelay(10U);
   }
+  progress = 2;
+  BSP_Oled_ShowLoading(progress);
 
   while (!s_sensor_ready)
   {
     osDelay(10U);
   }
+  progress = 3;
+  BSP_Oled_ShowLoading(progress);
 
-  BSP_Oled_ShowBoot(&s_self_test);
-  osDelay(1000U);
+  osDelay(300U);
+  state = UI_STATE_MENU;
 
   for (;;)
   {
-    if (osMessageQueueGet(s_rtos.sample_queue, &sample, NULL, osWaitForever) == osOK)
+    switch (state)
     {
-      BSP_Oled_ShowSample(&sample);
+    case UI_STATE_LOADING:
+      osDelay(APP_UI_TICK_MS);
+      break;
+
+    case UI_STATE_MENU:
+      BSP_Oled_ShowMenu(menu_selection, MODULE_COUNT, s_module_names);
+
+      for (;;)
+      {
+        (void)osThreadFlagsWait(EC11_FLAG_ROTATION,
+                                osFlagsWaitAny, APP_UI_TICK_MS);
+        rotation = BSP_EC11_GetRotation();
+
+        if (rotation > 0)
+        {
+          if (menu_selection < MODULE_COUNT - 1U)
+          {
+            menu_selection++;
+            BSP_Oled_ShowMenu(menu_selection, MODULE_COUNT, s_module_names);
+          }
+        }
+        else if (rotation < 0)
+        {
+          if (menu_selection > 0U)
+          {
+            menu_selection--;
+            BSP_Oled_ShowMenu(menu_selection, MODULE_COUNT, s_module_names);
+          }
+        }
+
+        if (BSP_EC11_IsKeyPressed())
+        {
+          state = (menu_selection == MODULE_TEMP) ? UI_STATE_MODULE_TEMP
+                                                   : UI_STATE_MODULE_FLASH;
+          break;
+        }
+      }
+      break;
+
+    case UI_STATE_MODULE_TEMP:
+      for (;;)
+      {
+        if (osMessageQueueGet(s_rtos.sample_queue, &sample, NULL,
+                              APP_UI_TICK_MS) == osOK)
+        {
+          BSP_Oled_ShowSample(&sample);
+        }
+
+        (void)osThreadFlagsWait(EC11_FLAG_ROTATION, osFlagsWaitAny, 0U);
+        (void)BSP_EC11_GetRotation();
+
+        if (BSP_EC11_IsKeyPressed())
+        {
+          state = UI_STATE_MENU;
+          break;
+        }
+      }
+      break;
+
+    case UI_STATE_MODULE_FLASH:
+    {
+      uint32_t total_kb = 8192UL;
+      uint32_t used_sectors = 1UL;
+      BSP_Oled_ShowFlashInfo(total_kb, used_sectors * 4UL);
+    }
+
+      for (;;)
+      {
+        osDelay(APP_UI_TICK_MS);
+
+        (void)osThreadFlagsWait(EC11_FLAG_ROTATION, osFlagsWaitAny, 0U);
+        (void)BSP_EC11_GetRotation();
+
+        if (BSP_EC11_IsKeyPressed())
+        {
+          state = UI_STATE_MENU;
+          break;
+        }
+      }
+      break;
     }
   }
 }

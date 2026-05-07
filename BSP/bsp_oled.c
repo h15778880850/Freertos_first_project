@@ -56,6 +56,7 @@ static const uint8_t *font5x7(char ch)
   static const uint8_t v[5] = {0x1F, 0x20, 0x40, 0x20, 0x1F};
   static const uint8_t w[5] = {0x7F, 0x20, 0x18, 0x20, 0x7F};
   static const uint8_t y[5] = {0x07, 0x08, 0x70, 0x08, 0x07};
+  static const uint8_t gt[5] = {0x60, 0x30, 0x18, 0x30, 0x60};
 
   switch (ch)
   {
@@ -74,32 +75,40 @@ static const uint8_t *font5x7(char ch)
     case '7': return seven;
     case '8': return eight;
     case '9': return nine;
-    case 'A': return a;
-    case 'B': return b;
-    case 'C': return c;
-    case 'D': return d;
-    case 'E': return e;
-    case 'F': return f;
-    case 'G': return g;
-    case 'H': return h;
-    case 'I': return i;
-    case 'K': return k;
-    case 'L': return l;
-    case 'M': return m;
-    case 'N': return n;
-    case 'O': return o;
-    case 'P': return p;
-    case 'R': return r;
-    case 'S': return s;
-    case 'T': return t;
-    case 'U': return u;
-    case 'V': return v;
-    case 'W': return w;
-    case 'Y': return y;
+    case 'a': case 'A': return a;
+    case 'b': case 'B': return b;
+    case 'c': case 'C': return c;
+    case 'd': case 'D': return d;
+    case 'e': case 'E': return e;
+    case 'f': case 'F': return f;
+    case 'g': case 'G': return g;
+    case 'h': case 'H': return h;
+    case 'i': case 'I': return i;
+    case 'k': case 'K': return k;
+    case 'l': case 'L': return l;
+    case 'm': case 'M': return m;
+    case 'n': case 'N': return n;
+    case 'o': case 'O': return o;
+    case 'p': case 'P': return p;
+    case 'r': case 'R': return r;
+    case 's': case 'S': return s;
+    case 't': case 'T': return t;
+    case 'u': case 'U': return u;
+    case 'v': case 'V': return v;
+    case 'w': case 'W': return w;
+    case 'y': case 'Y': return y;
+    case '>': return gt;
     default: return blank;
   }
 }
 
+/**
+ * @brief 向OLED发送命令
+ *
+ * @param cmd 要发送的命令字节
+ * @return true 发送成功
+ * @return false 发送失败
+ */
 static bool oled_cmd(uint8_t cmd)
 {
   uint8_t payload[2] = {0x00U, cmd};
@@ -188,23 +197,110 @@ bool BSP_Oled_Init(void)
   return s_oled_ready;
 }
 
-void BSP_Oled_ShowBoot(const AppSelfTest *self_test)
+void BSP_Oled_ShowLoading(uint8_t step)
 {
-  char line[22];
-
-  if (!s_oled_ready || (self_test == 0))
+  if (!s_oled_ready)
   {
     return;
   }
 
   oled_clear();
-  oled_puts(0, 0, "SELFTEST");
-  oled_puts(2, 0, self_test->flash_ok ? "FLASH OK" : "FLASH ERR");
-  oled_puts(3, 0, self_test->config_restored ? "CFG RESTORED" : "CFG DEFAULT");
-  oled_puts(4, 0, self_test->ds18b20_ok ? "DS18B20 OK" : "DS18B20 ERR");
-  snprintf(line, sizeof(line), "ID:%06lX", (unsigned long)self_test->flash_jedec_id);
-  oled_puts(5, 0, line);
+  oled_puts(0, 0, "LOADING");
+
+  for (uint8_t i = 0; i < step && i < 12U; i++)
+  {
+    uint16_t offset = (uint16_t)2 * OLED_WIDTH + (uint16_t)i * 8U;
+    if (offset + 7U < sizeof(s_oled_buffer))
+    {
+      s_oled_buffer[offset] = 0xFFU;
+    }
+  }
+
   oled_puts(7, 0, "FW0422");
+  oled_flush();
+}
+
+void BSP_Oled_ShowMenu(uint8_t selection, uint8_t module_count,
+                       const char *const *module_names)
+{
+  char line[22];
+
+  if (!s_oled_ready || (module_names == 0) || (module_count == 0U))
+  {
+    return;
+  }
+
+  oled_clear();
+  oled_puts(0, 0, "- SELECT MODULE -");
+
+  for (uint8_t i = 0; i < module_count && i < 6U; i++)
+  {
+    const char *name = module_names[i];
+    if (name == 0)
+    {
+      name = "";
+    }
+
+    if (i == selection)
+    {
+      line[0] = '>';
+    }
+    else
+    {
+      line[0] = ' ';
+    }
+    line[1] = ' ';
+    strncpy(&line[2], name, sizeof(line) - 3U);
+    line[sizeof(line) - 1U] = '\0';
+    oled_puts((uint8_t)(i + 2), 0, line);
+  }
+
+  oled_flush();
+}
+
+void BSP_Oled_ShowFlashInfo(uint32_t total_kb, uint32_t used_kb)
+{
+  char line[22];
+
+  if (!s_oled_ready)
+  {
+    return;
+  }
+
+  oled_clear();
+  oled_puts(0, 0, "FLASH STORAGE");
+
+  snprintf(line, sizeof(line), "Total:%lu KB", (unsigned long)total_kb);
+  oled_puts(2, 0, line);
+
+  snprintf(line, sizeof(line), "Used: %lu KB", (unsigned long)used_kb);
+  oled_puts(3, 0, line);
+
+  snprintf(line, sizeof(line), "Free: %lu KB", (unsigned long)(total_kb - used_kb));
+  oled_puts(4, 0, line);
+
+  if (total_kb > 0U)
+  {
+    uint8_t usage = (uint8_t)((used_kb * 100U) / total_kb);
+    snprintf(line, sizeof(line), "Usage: %u%%", usage);
+
+    uint8_t bar_len = (uint8_t)((used_kb * 16U) / total_kb);
+    for (uint8_t i = 0; i < bar_len; i++)
+    {
+      uint16_t offset = (uint16_t)6 * OLED_WIDTH + (uint16_t)i * 8U;
+      if (offset + 7U < sizeof(s_oled_buffer))
+      {
+        s_oled_buffer[offset] = 0xFFU;
+      }
+    }
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "Usage: N/A");
+  }
+  oled_puts(5, 0, line);
+
+  oled_puts(7, 0, "KEY: back to menu");
   oled_flush();
 }
 
